@@ -1,0 +1,90 @@
+rules_version = '2';
+
+// 공부일지 보안 규칙
+// - 로그인(앱 전용 아이디)한 사람만 읽고 쓸 수 있어요.
+// - 내 기록(users/{내 uid})은 나만 읽고 쓸 수 있어요.
+// - 반 목록은 아무도 볼 수 없어요. 반 코드를 아는 사람만 그 반에 들어갈 수 있어요.
+// - 반에서는 각자 자기 정보(members/{내 uid})만 쓰고 지울 수 있어요.
+// - 반 일정은 반에 들어간 사람만 올릴 수 있고, 올린 사람만 지울 수 있어요.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // ---- 내 기록 (계획, 공부 기록, 일정 등 전체) ----
+    match /users/{uid} {
+      allow read, delete: if signedIn() && request.auth.uid == uid;
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['data', 'rev', 'updatedAt'])
+        && request.resource.data.data is string
+        && request.resource.data.data.size() < 1000000
+        && request.resource.data.rev is int
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validMember(d) {
+      return d.keys().hasOnly(['nickname', 'totalPts', 'totalSec', 'studying', 'updatedAt'])
+        && d.keys().hasAll(['nickname', 'totalPts', 'totalSec', 'updatedAt'])
+        && d.nickname is string && d.nickname.size() > 0 && d.nickname.size() <= 12
+        && d.totalPts is int && d.totalPts >= -100000 && d.totalPts <= 10000000
+        && d.totalSec is int && d.totalSec >= 0 && d.totalSec <= 100000000
+        && (!('studying' in d) || d.studying == null
+            || (d.studying is map
+                && d.studying.keys().hasOnly(['sub', 'since'])
+                && d.studying.sub is string && d.studying.sub.size() <= 12
+                && d.studying.since is int))
+        && d.updatedAt == request.time;
+    }
+
+    function isMember(code) {
+      return exists(/databases/$(database)/documents/groups/$(code)/members/$(request.auth.uid));
+    }
+
+    // ---- 반 ----
+    match /groups/{code} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && code.matches('^[A-Z0-9]{6}$')
+        && request.resource.data.keys().hasOnly(['name', 'owner', 'createdAt'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 20
+        && request.resource.data.owner == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+
+      // 반 친구들: 아이디, 총 포인트, 총 공부 시간, 지금 공부 중인 과목
+      match /members/{uid} {
+        allow read: if signedIn();
+        allow create, update: if signedIn()
+          && request.auth.uid == uid
+          && exists(/databases/$(database)/documents/groups/$(code))
+          && validMember(request.resource.data);
+        allow delete: if signedIn() && request.auth.uid == uid;
+      }
+
+      // 반 일정: 시험, 수행평가
+      match /events/{eid} {
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && isMember(code)
+          && request.resource.data.keys().hasOnly(['title', 'type', 'date', 'by', 'uid', 'createdAt'])
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.title is string
+          && request.resource.data.title.size() > 0
+          && request.resource.data.title.size() <= 30
+          && request.resource.data.type in ['exam', 'task', 'etc']
+          && request.resource.data.date is string
+          && request.resource.data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && request.resource.data.by is string
+          && request.resource.data.by.size() <= 12
+          && request.resource.data.createdAt == request.time;
+        allow update: if false;
+        allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+      }
+    }
+  }
+}
